@@ -9,6 +9,7 @@ import sys
 import tempfile
 import traceback
 import gc
+import json
 
 import requests
 import torch
@@ -20,6 +21,14 @@ print(f"[init] CUDA available: {torch.cuda.is_available()}", flush=True)
 if torch.cuda.is_available():
     print(f"[init] GPU: {torch.cuda.get_device_name(0)}", flush=True)
     print(f"[init] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB", flush=True)
+
+# Verify whisperx can be imported
+try:
+    import whisperx
+    print(f"[init] WhisperX version: {whisperx.__version__}", flush=True)
+except Exception as e:
+    print(f"[init] ERROR importing whisperx: {e}", flush=True)
+    traceback.print_exc()
 
 # Global model cache - loaded lazily on first job
 _model = None
@@ -42,7 +51,7 @@ def get_model():
 
 def download_audio(url, dest_path):
     """Download audio file from URL to a local path."""
-    print(f"[job] Downloading audio...", flush=True)
+    print(f"[job] Downloading audio from: {url[:100]}...", flush=True)
     response = requests.get(url, stream=True, timeout=600)
     response.raise_for_status()
 
@@ -61,8 +70,12 @@ def handler(job):
     """Process a transcription job."""
     import whisperx
 
+    print(f"[job] === NEW JOB RECEIVED ===", flush=True)
+    print(f"[job] Job keys: {list(job.keys())}", flush=True)
+
     try:
         job_input = job["input"]
+        print(f"[job] Input keys: {list(job_input.keys())}", flush=True)
 
         # Parse input parameters
         audio_url = job_input["audio_file"]
@@ -73,33 +86,43 @@ def handler(job):
         min_speakers = job_input.get("min_speakers")
         max_speakers = job_input.get("max_speakers")
 
+        print(f"[job] audio_url: {audio_url[:100]}...", flush=True)
+        print(f"[job] language={language}, batch_size={batch_size}, diarization={diarization}", flush=True)
+        print(f"[job] hf_token present: {bool(hf_token)}", flush=True)
+
         # Load model (cached after first call)
+        print("[job] Step 1: Loading model...", flush=True)
         model, device, compute_type = get_model()
+        print("[job] Step 1: Model ready.", flush=True)
 
         # Download audio to temp file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
 
         try:
+            print("[job] Step 2: Downloading audio...", flush=True)
             download_audio(audio_url, tmp_path)
+            print("[job] Step 2: Download complete.", flush=True)
 
             # Load audio
-            print("[job] Loading audio...", flush=True)
+            print("[job] Step 3: Loading audio into memory...", flush=True)
             audio = whisperx.load_audio(tmp_path)
+            print(f"[job] Step 3: Audio loaded. Length: {len(audio)} samples ({len(audio)/16000:.1f}s)", flush=True)
 
             # Transcribe
-            print(f"[job] Transcribing (batch_size={batch_size}, language={language})...", flush=True)
+            print(f"[job] Step 4: Transcribing (batch_size={batch_size}, language={language})...", flush=True)
             result = model.transcribe(
                 audio,
                 batch_size=batch_size,
                 language=language,
             )
+            print(f"[job] Step 4: Transcription complete. {len(result.get('segments', []))} segments.", flush=True)
 
             detected_language = result.get("language", language or "en")
             print(f"[job] Detected language: {detected_language}", flush=True)
 
             # Align output for word-level timestamps
-            print("[job] Aligning output...", flush=True)
+            print("[job] Step 5: Aligning output...", flush=True)
             align_model, align_metadata = whisperx.load_align_model(
                 language_code=detected_language,
                 device=device,
@@ -112,6 +135,7 @@ def handler(job):
                 device,
                 return_char_alignments=False,
             )
+            print("[job] Step 5: Alignment complete.", flush=True)
 
             # Free alignment model memory
             del align_model, align_metadata
@@ -121,7 +145,7 @@ def handler(job):
 
             # Speaker diarization
             if diarization and hf_token:
-                print("[job] Running speaker diarization...", flush=True)
+                print("[job] Step 6: Running speaker diarization...", flush=True)
                 diarize_model = whisperx.DiarizationPipeline(
                     use_auth_token=hf_token,
                     device=device,
@@ -142,18 +166,56 @@ def handler(job):
                 if device == "cuda":
                     torch.cuda.empty_cache()
 
-                print(f"[job] Diarization complete.", flush=True)
+                print(f"[job] Step 6: Diarization complete.", flush=True)
             elif diarization and not hf_token:
                 print("[job] WARNING: Diarization requested but no HF token. Skipping.", flush=True)
+            else:
+                print("[job] Diarization not requested. Skipping.", flush=True)
 
             # Build output
             segments = result.get("segments", [])
-            print(f"[job] Done. {len(segments)} segments produced.", flush=True)
+            print(f"[job] Done! {len(segments)} segments produced.", flush=True)
 
-            return {
-                "segments": segments,
+            # Ensure all segment data is JSON-serializable
+            clean_segments = []
+            for seg in segments:
+                clean_seg = {}
+                for k, v in seg.items():
+                    if isinstance(v, float) and (v != v):  # NaN check
+                        clean_seg[k] = None
+                    elif isinstance(v, list):
+                        clean_words = []
+                        for w in v:
+                            if isinstance(w, dict):
+                                clean_w = {}
+                                for wk, wv in w.items():
+                                    if isinstance(wv, float) and (wv != wv):
+                                        clean_w[wk] = None
+                                    else:
+                                        clean_w[wk] = wv
+                                clean_words.append(clean_w)
+                            else:
+                                clean_words.append(w)
+                        clean_seg[k] = clean_words
+                    else:
+                        clean_seg[k] = v
+                clean_segments.append(clean_seg)
+
+            output = {
+                "segments": clean_segments,
                 "detected_language": detected_language,
             }
+
+            # Verify it's serializable before returning
+            try:
+                json.dumps(output)
+                print("[job] Output verified as JSON-serializable.", flush=True)
+            except (TypeError, ValueError) as e:
+                print(f"[job] WARNING: Output not JSON-serializable: {e}", flush=True)
+                # Fallback: convert everything to strings
+                output = json.loads(json.dumps(output, default=str))
+
+            return output
 
         finally:
             # Clean up temp file
@@ -161,8 +223,10 @@ def handler(job):
                 os.unlink(tmp_path)
 
     except Exception as e:
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"[job] ERROR: {error_msg}", flush=True)
         traceback.print_exc()
-        return {"error": str(e)}
+        return {"error": error_msg}
 
 
 print("[init] Handler registered. Ready for jobs.", flush=True)
