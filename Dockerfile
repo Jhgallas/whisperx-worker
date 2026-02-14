@@ -16,7 +16,11 @@ RUN pip install --no-cache-dir \
     runpod==1.7.0 \
     whisperx==3.1.1 \
     pyannote.audio==3.1.1 \
+    "huggingface_hub>=0.23" \
     requests
+
+# Pre-download the WhisperX model to avoid runtime download issues
+RUN python -c "from faster_whisper.utils import download_model; download_model('large-v2')"
 
 WORKDIR /app
 COPY handler.py .
