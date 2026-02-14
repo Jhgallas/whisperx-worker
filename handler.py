@@ -16,6 +16,25 @@ import numpy as np
 if not hasattr(np, 'NaN'):
     np.NaN = np.nan
 
+# Fix urllib 301 redirect handling for Hugging Face model downloads
+import urllib.request
+_orig_urlopen = urllib.request.urlopen
+def _patched_urlopen(url, *args, **kwargs):
+    """Follow 301 redirects that urllib doesn't handle by default."""
+    try:
+        return _orig_urlopen(url, *args, **kwargs)
+    except urllib.error.HTTPError as e:
+        if e.code == 301 and e.headers.get('Location'):
+            new_url = e.headers['Location']
+            print(f"[patch] Following 301 redirect to: {new_url[:100]}...", flush=True)
+            if isinstance(url, urllib.request.Request):
+                url = urllib.request.Request(new_url, headers=dict(url.headers))
+            else:
+                url = new_url
+            return _orig_urlopen(url, *args, **kwargs)
+        raise
+urllib.request.urlopen = _patched_urlopen
+
 import requests
 import torch
 import runpod
