@@ -19,7 +19,7 @@ print(f"[init] Python: {sys.version}", flush=True)
 print(f"[init] CUDA available: {torch.cuda.is_available()}", flush=True)
 if torch.cuda.is_available():
     print(f"[init] GPU: {torch.cuda.get_device_name(0)}", flush=True)
-    print(f"[init] VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB", flush=True)
+    print(f"[init] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB", flush=True)
 
 # Global model cache - loaded lazily on first job
 _model = None
