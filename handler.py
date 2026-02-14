@@ -49,7 +49,18 @@ def get_model():
         _device = "cuda" if torch.cuda.is_available() else "cpu"
         _compute_type = "float16" if _device == "cuda" else "int8"
         print(f"[model] Loading WhisperX large-v2 on {_device} ({_compute_type})...", flush=True)
-        _model = whisperx.load_model("large-v2", _device, compute_type=_compute_type)
+        # Pass missing TranscriptionOptions args for faster-whisper compat
+        asr_options = {
+            "multilingual": True,
+            "max_new_tokens": None,
+            "clip_timestamps": None,
+            "hallucination_silence_threshold": None,
+            "hotwords": None,
+        }
+        _model = whisperx.load_model(
+            "large-v2", _device, compute_type=_compute_type,
+            asr_options=asr_options,
+        )
         print(f"[model] WhisperX model loaded successfully.", flush=True)
     return _model, _device, _compute_type
 
