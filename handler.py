@@ -17,23 +17,34 @@ if not hasattr(np, 'NaN'):
     np.NaN = np.nan
 
 # Fix urllib 301 redirect handling for Hugging Face model downloads
+# Use install_opener to globally handle redirects (including 301)
 import urllib.request
-_orig_urlopen = urllib.request.urlopen
-def _patched_urlopen(url, *args, **kwargs):
-    """Follow 301 redirects that urllib doesn't handle by default."""
-    try:
-        return _orig_urlopen(url, *args, **kwargs)
-    except urllib.error.HTTPError as e:
-        if e.code == 301 and e.headers.get('Location'):
-            new_url = e.headers['Location']
-            print(f"[patch] Following 301 redirect to: {new_url[:100]}...", flush=True)
-            if isinstance(url, urllib.request.Request):
-                url = urllib.request.Request(new_url, headers=dict(url.headers))
-            else:
-                url = new_url
-            return _orig_urlopen(url, *args, **kwargs)
-        raise
-urllib.request.urlopen = _patched_urlopen
+import urllib.error
+
+class _RedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Handle 301 redirects that default urllib may reject."""
+    def http_error_301(self, req, fp, code, msg, headers):
+        result = urllib.request.HTTPRedirectHandler.http_error_301(
+            self, req, fp, code, msg, headers)
+        return result
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        print(f"[patch] Following {code} redirect to: {newurl[:100]}...", flush=True)
+        # Allow all redirect methods (urllib blocks POST->GET redirects by default)
+        m = req.get_method()
+        if code in (301, 302, 303, 307, 308):
+            newreq = urllib.request.Request(
+                newurl,
+                headers=dict(req.header_items()),
+                origin_req_host=req.origin_req_host,
+                unverifiable=True,
+            )
+            return newreq
+        return urllib.request.HTTPRedirectHandler.redirect_request(
+            self, req, fp, code, msg, headers, newurl)
+
+_opener = urllib.request.build_opener(_RedirectHandler)
+urllib.request.install_opener(_opener)
 
 import requests
 import torch
