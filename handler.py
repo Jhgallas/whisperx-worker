@@ -11,6 +11,11 @@ import traceback
 import gc
 import json
 
+# Fix np.NaN removal in NumPy 2.0 (needed by pyannote.audio 3.1.1)
+import numpy as np
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
+
 import requests
 import torch
 import runpod
