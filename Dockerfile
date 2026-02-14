@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies
+# Pin numpy<2.0 to avoid np.NaN removal issue in pyannote.audio 3.1.1
 RUN pip install --no-cache-dir \
+    "numpy<2.0" \
     runpod==1.7.0 \
     whisperx==3.1.1 \
     pyannote.audio==3.1.1 \
