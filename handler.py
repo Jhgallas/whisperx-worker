@@ -1,7 +1,8 @@
 """
 RunPod Serverless Handler for WhisperX Transcription with Speaker Diarization.
 
-Uses proven compatible stack: torch 2.0, whisperx 3.1.6, numpy 1.26, CUDA 11.8.
+Uses large-v3-turbo model for optimal speed/accuracy/cost balance.
+Supports auto language detection for bilingual audio.
 Models are pre-downloaded in Docker image; loaded lazily on first job.
 """
 
@@ -40,6 +41,8 @@ _model = None
 _device = None
 _compute_type = None
 
+MODEL_NAME = "large-v3-turbo"
+
 
 def get_model():
     """Load WhisperX model on first call, cache for reuse."""
@@ -47,9 +50,11 @@ def get_model():
     if _model is None:
         import whisperx
         _device = "cuda" if torch.cuda.is_available() else "cpu"
-        _compute_type = "float16" if _device == "cuda" else "int8"
-        print(f"[model] Loading WhisperX large-v2 on {_device} ({_compute_type})...", flush=True)
-        _model = whisperx.load_model("large-v2", _device, compute_type=_compute_type)
+        # int8_float16: quantized weights (fast) with float16 activations (accurate)
+        # Best balance for RTX 4090 — faster than float16 with negligible quality loss
+        _compute_type = "int8_float16" if _device == "cuda" else "int8"
+        print(f"[model] Loading WhisperX {MODEL_NAME} on {_device} ({_compute_type})...", flush=True)
+        _model = whisperx.load_model(MODEL_NAME, _device, compute_type=_compute_type)
         print(f"[model] Model loaded successfully.", flush=True)
     return _model, _device, _compute_type
 
@@ -78,15 +83,18 @@ def handler(job):
     try:
         job_input = job["input"]
 
-        audio_url = job_input["audio_file"]
+        audio_url = job_input.get("audio_url") or job_input.get("audio_file")
         language = job_input.get("language", None)
+        # Treat "auto" as None so whisper auto-detects
+        if language == "auto":
+            language = None
         batch_size = job_input.get("batch_size", 16)
         diarization = job_input.get("diarization", True)
         hf_token = job_input.get("huggingface_access_token") or os.environ.get("HF_TOKEN")
         min_speakers = job_input.get("min_speakers")
         max_speakers = job_input.get("max_speakers")
 
-        print(f"[job] language={language}, batch_size={batch_size}, diarization={diarization}", flush=True)
+        print(f"[job] language={language or 'auto-detect'}, batch_size={batch_size}, diarization={diarization}", flush=True)
 
         # Step 1: Load model
         print("[job] Step 1: Loading model...", flush=True)
@@ -115,12 +123,16 @@ def handler(job):
 
             # Step 5: Align
             print("[job] Step 5: Aligning...", flush=True)
-            align_model, align_metadata = whisperx.load_align_model(
-                language_code=detected_language, device=device)
-            result = whisperx.align(
-                result["segments"], align_model, align_metadata,
-                audio, device, return_char_alignments=False)
-            del align_model, align_metadata
+            try:
+                align_model, align_metadata = whisperx.load_align_model(
+                    language_code=detected_language, device=device)
+                result = whisperx.align(
+                    result["segments"], align_model, align_metadata,
+                    audio, device, return_char_alignments=False)
+                del align_model, align_metadata
+            except Exception as e:
+                # Alignment model may not exist for all languages — continue without alignment
+                print(f"[job] Step 5: Alignment failed ({e}), continuing without alignment.", flush=True)
             gc.collect()
             if device == "cuda":
                 torch.cuda.empty_cache()
